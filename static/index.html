@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BaristaBot Cafe ☕</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://sandbox.web.squarecdn.com/v1/square.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --cream:   #F7F2EA;
+      --ink:     #1C1710;
+      --roast:   #6B3F1E;
+      --steam:   #C8A882;
+      --foam:    #EDE4D3;
+      --mid:     #8C7355;
+      --success: #2D6A4F;
+      --error:   #9B2335;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--cream);
+      color: var(--ink);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 15px;
+    }
+
+    /* ── Layout ── */
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 18px 24px 14px;
+      border-bottom: 1px solid var(--steam);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--cream);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .wordmark {
+      font-family: 'DM Serif Display', serif;
+      font-size: 1.35rem;
+      color: var(--roast);
+      letter-spacing: -0.02em;
+    }
+    .wordmark span { color: var(--ink); }
+    #btn-new {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      background: none;
+      border: 1.5px solid var(--steam);
+      color: var(--mid);
+      border-radius: 20px;
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    #btn-new:hover { border-color: var(--roast); color: var(--roast); }
+
+    /* ── Chat area ── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+    }
+
+    .bubble {
+      max-width: 78%;
+      padding: 12px 16px;
+      border-radius: 18px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble.bot {
+      background: var(--foam);
+      color: var(--ink);
+      border-bottom-left-radius: 4px;
+      align-self: flex-start;
+    }
+    .bubble.user {
+      background: var(--roast);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+      align-self: flex-end;
+    }
+    .bubble.system {
+      background: transparent;
+      border: 1.5px solid var(--steam);
+      color: var(--mid);
+      font-size: 13px;
+      align-self: center;
+      border-radius: 12px;
+      text-align: center;
+    }
+
+    /* ── Typing indicator ── */
+    .typing { align-self: flex-start; display: flex; gap: 5px; padding: 14px 16px; background: var(--foam); border-radius: 18px; border-bottom-left-radius: 4px; }
+    .typing span { width: 7px; height: 7px; background: var(--steam); border-radius: 50%; animation: bounce 1.2s infinite; }
+    .typing span:nth-child(2) { animation-delay: .2s; }
+    .typing span:nth-child(3) { animation-delay: .4s; }
+    @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+
+    /* ── Input bar ── */
+    #input-bar {
+      padding: 14px 20px 20px;
+      border-top: 1px solid var(--steam);
+      background: var(--cream);
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    #user-input {
+      flex: 1;
+      resize: none;
+      border: 1.5px solid var(--steam);
+      border-radius: 14px;
+      padding: 11px 14px;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 15px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+      line-height: 1.45;
+      max-height: 140px;
+      transition: border-color .15s;
+    }
+    #user-input:focus { border-color: var(--roast); }
+    #user-input:disabled { background: var(--foam); cursor: not-allowed; }
+    #btn-send {
+      width: 44px; height: 44px;
+      background: var(--roast);
+      border: none; border-radius: 50%;
+      cursor: pointer;
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: background .15s;
+    }
+    #btn-send:hover:not(:disabled) { background: var(--ink); }
+    #btn-send:disabled { background: var(--steam); cursor: not-allowed; }
+    #btn-send svg { width: 18px; height: 18px; }
+
+    /* ── Payment modal ── */
+    #modal-backdrop {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(28,23,16,.45);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    #modal-backdrop.open { display: flex; }
+    #modal {
+      background: #fff;
+      border-radius: 20px;
+      padding: 32px 28px 28px;
+      width: 100%;
+      max-width: 400px;
+      margin: 20px;
+      box-shadow: 0 8px 40px rgba(28,23,16,.18);
+    }
+    .modal-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 1.3rem;
+      color: var(--roast);
+      margin-bottom: 6px;
+    }
+    .modal-total {
+      font-size: 1rem;
+      color: var(--mid);
+      margin-bottom: 20px;
+    }
+    .modal-total strong { color: var(--ink); font-size: 1.25rem; }
+    #card-container { min-height: 89px; margin-bottom: 20px; }
+    #pay-btn {
+      width: 100%;
+      padding: 14px;
+      background: var(--roast);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #pay-btn:hover:not(:disabled) { background: var(--ink); }
+    #pay-btn:disabled { background: var(--steam); cursor: not-allowed; }
+    #pay-status { margin-top: 12px; font-size: 13px; text-align: center; min-height: 18px; color: var(--mid); }
+    .pay-error { color: var(--error) !important; }
+    .pay-success { color: var(--success) !important; }
+
+    /* test card hint */
+    .test-hint {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--mid);
+      text-align: center;
+      border-top: 1px solid var(--foam);
+      padding-top: 12px;
+    }
+    .test-hint code { background: var(--foam); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="wordmark">Barista<span>Bot</span> ☕</div>
+    <button id="btn-new">New order</button>
+  </header>
+
+  <div id="chat"></div>
+
+  <div id="input-bar">
+    <textarea id="user-input" rows="1" placeholder="Say something…"></textarea>
+    <button id="btn-send" aria-label="Send">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<!-- Payment modal -->
+<div id="modal-backdrop">
+  <div id="modal">
+    <div class="modal-title">Complete payment</div>
+    <div class="modal-total">Total: <strong id="modal-total-display">$0.00</strong></div>
+    <div id="card-container"></div>
+    <button id="pay-btn" disabled>Loading…</button>
+    <div id="pay-status"></div>
+    <div class="test-hint">
+      Sandbox · use test card <code>4111 1111 1111 1111</code>, any future date, any CVV
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let threadId = null;
+  let squareCard = null;
+  let paymentTotalCents = 0;
+  let squareAppId = '';
+  let squareLocationId = '';
+
+  // ── DOM refs ───────────────────────────────────────────────────────────────
+  const chatEl      = document.getElementById('chat');
+  const inputEl     = document.getElementById('user-input');
+  const sendBtn     = document.getElementById('btn-send');
+  const newBtn      = document.getElementById('btn-new');
+  const backdrop    = document.getElementById('modal-backdrop');
+  const modalTotal  = document.getElementById('modal-total-display');
+  const payBtn      = document.getElementById('pay-btn');
+  const payStatus   = document.getElementById('pay-status');
+  const cardContainer = document.getElementById('card-container');
+
+  // ── Render helpers ─────────────────────────────────────────────────────────
+  function addBubble(role, text) {
+    const div = document.createElement('div');
+    div.className = `bubble ${role}`;
+    div.textContent = text;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return div;
+  }
+
+  function showTyping() {
+    const el = document.createElement('div');
+    el.className = 'typing';
+    el.id = 'typing';
+    el.innerHTML = '<span></span><span></span><span></span>';
+    chatEl.appendChild(el);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function hideTyping() {
+    document.getElementById('typing')?.remove();
+  }
+
+  function renderMessages(messages) {
+    chatEl.innerHTML = '';
+    for (const m of messages) {
+      addBubble(m.role === 'assistant' ? 'bot' : 'user', m.text);
+    }
+  }
+
+  function setInputEnabled(enabled) {
+    inputEl.disabled = !enabled;
+    sendBtn.disabled = !enabled;
+  }
+
+  // ── Square ─────────────────────────────────────────────────────────────────
+  async function loadSquare() {
+    if (!window.Square) { console.error('Square SDK not loaded'); return; }
+    try {
+      const payments = window.Square.payments(squareAppId, squareLocationId);
+      squareCard = await payments.card();
+      await squareCard.attach('#card-container');
+      payBtn.disabled = false;
+      payBtn.textContent = `Pay ${modalTotal.textContent}`;
+    } catch (err) {
+      payStatus.textContent = '⚠️ Could not load card form: ' + err.message;
+      payStatus.className = 'pay-error';
+    }
+  }
+
+  async function openPaymentModal(totalDisplay, totalCents) {
+    paymentTotalCents = totalCents;
+    modalTotal.textContent = totalDisplay;
+    payBtn.textContent = 'Loading…';
+    payBtn.disabled = true;
+    payStatus.textContent = '';
+    payStatus.className = '';
+    cardContainer.innerHTML = '';
+    squareCard = null;
+    backdrop.classList.add('open');
+    setInputEnabled(false);
+    await loadSquare();
+  }
+
+  payBtn.addEventListener('click', async () => {
+    if (!squareCard) return;
+    payBtn.disabled = true;
+    payBtn.textContent = 'Processing…';
+    payStatus.textContent = '';
+    payStatus.className = '';
+
+    try {
+      const result = await squareCard.tokenize();
+      if (result.status !== 'OK') {
+        const msg = result.errors.map(e => e.message).join(', ');
+        payStatus.textContent = '❌ ' + msg;
+        payStatus.className = 'pay-error';
+        payBtn.disabled = false;
+        payBtn.textContent = `Pay ${modalTotal.textContent}`;
+        return;
+      }
+
+      payStatus.textContent = '✓ Card verified — confirming payment…';
+      payStatus.className = 'pay-success';
+
+      const res = await fetch(`/thread/${threadId}/pay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce: result.token, amount_cents: paymentTotalCents }),
+      });
+      const data = await res.json();
+
+      backdrop.classList.remove('open');
+      renderMessages(data.messages);
+      await handleInterrupt(data.interrupt);
+    } catch (err) {
+      payStatus.textContent = '❌ ' + err.message;
+      payStatus.className = 'pay-error';
+      payBtn.disabled = false;
+      payBtn.textContent = `Pay ${modalTotal.textContent}`;
+    }
+  });
+
+  // ── Interrupt handling ─────────────────────────────────────────────────────
+  async function handleInterrupt(interrupt) {
+    if (!interrupt) {
+      setInputEnabled(true);
+      return;
+    }
+    if (interrupt.is_payment) {
+      await openPaymentModal(interrupt.total_display, interrupt.total_cents);
+    } else {
+      // Show as a bot bubble (e.g. confirm order)
+      addBubble('bot', interrupt.message);
+      setInputEnabled(true);
+    }
+  }
+
+  // ── Send message ───────────────────────────────────────────────────────────
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || !threadId) return;
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    addBubble('user', text);
+    setInputEnabled(false);
+    showTyping();
+
+    try {
+      const res = await fetch(`/thread/${threadId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      const data = await res.json();
+      hideTyping();
+      renderMessages(data.messages);
+      await handleInterrupt(data.interrupt);
+    } catch (err) {
+      hideTyping();
+      addBubble('system', 'Something went wrong. Please try again.');
+      setInputEnabled(true);
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+  });
+
+  // ── New thread ─────────────────────────────────────────────────────────────
+  newBtn.addEventListener('click', init);
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
+  async function init() {
+    chatEl.innerHTML = '';
+    backdrop.classList.remove('open');
+    setInputEnabled(false);
+    showTyping();
+
+    try {
+      // Load Square credentials
+      if (!squareAppId) {
+        const cfg = await fetch('/config').then(r => r.json());
+        squareAppId = cfg.square_app_id;
+        squareLocationId = cfg.square_location_id;
+      }
+
+      const res = await fetch('/thread/new', { method: 'POST' });
+      const data = await res.json();
+      threadId = data.thread_id;
+      hideTyping();
+      renderMessages(data.messages);
+      await handleInterrupt(data.interrupt);
+    } catch (err) {
+      hideTyping();
+      addBubble('system', 'Could not connect to BaristaBot. Is the server running?');
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>
