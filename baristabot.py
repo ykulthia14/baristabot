@@ -17,7 +17,7 @@ from square.environment import SquareEnvironment
 from square.core.api_error import ApiError
 
 from dotenv import load_dotenv
-from langchain_community.vectorstores import Chroma
+from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_core.messages import AIMessage
 from langchain_core.messages.tool import ToolMessage
 from langchain_core.tools import tool
@@ -170,7 +170,7 @@ def lookup_price(drink: str) -> float:
     return MENU_PRICES.get(drink.strip().lower(), 0.00)
 _embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview")
 
-menu_vectorstore = Chroma.from_texts(
+menu_vectorstore = InMemoryVectorStore.from_texts(
     texts=MENU_DOCS,
     embedding=_embeddings,
     collection_name="cafe_menu",
