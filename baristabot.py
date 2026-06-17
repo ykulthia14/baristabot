@@ -175,7 +175,10 @@ BARISTABOT_SYSINT = (
     "Do not proceed until you have BOTH. If they try to order first, remind them you need "
     "their name and email first. If the email looks invalid, ask them to confirm it.\n\n"
     "STEP 2 - SHOW MENU:\n"
-    "Once you have name and email, call get_full_menu and display it clearly. "
+    "Once you have name and email, call get_full_menu. "
+    "You must explicitly repeat and print the entire menu text returned by the tool "
+    "directly inside your chat response message so the customer can read it. "
+    "Do not just say 'look at the menu above'—include the menu tables in your reply. "
     "Then ask what they would like to order.\n\n"
     "STEP 3 - TAKE THE ORDER:\n"
     "Add items with add_to_order. Rules:\n"
@@ -264,6 +267,19 @@ def charge_square(nonce: str, amount_cents: int) -> str:
 
 @tool
 def get_menu(query: str) -> str:
+    """Retrieve relevant menu sections for a given customer query.
+ 
+    Args:
+        query: The customer question or item they mentioned.
+    Returns:
+        Relevant menu sections as a single string.
+    """
+    docs = menu_retriever.invoke(query)
+    return "\n".join(doc.page_content for doc in docs)
+ 
+ 
+@tool
+def get_full_menu() -> str:
     """Retrieve the entire cafe menu with pricing and structural sections.
     Use immediately after getting the user name and email.
     """
@@ -272,39 +288,31 @@ def get_menu(query: str) -> str:
         "🥛 Coffee Drinks with Milk": ["latte", "cappuccino", "cortado", "macchiato", "mocha", "flat white"],
         "🍃 Tea Drinks (No Milk)": ["english breakfast tea", "green tea", "earl grey"],
         "🍵 Tea Drinks with Milk": ["chai latte", "matcha latte", "london fog"],
-        "✨ Other Drinks": ["steamer", "hot chocolate"]
+        "✨ Other Drinks": ["steamer", "hot chocolate"],
     }
-
+ 
     menu_output = ["### 📜 Our Menu\n"]
-
+ 
     for section_name, items in sections.items():
         menu_output.append(f"#### {section_name}")
         menu_output.append("| Item | Price |")
         menu_output.append("| :--- | :--- |")
         for item in items:
             price = MENU_PRICES.get(item, 0.00)
-            display_name = item.title()
-            menu_output.append(f"| {display_name} | ${price:.2f} |")
+            menu_output.append(f"| {item.title()} | ${price:.2f} |")
         menu_output.append("")
-
-    
+ 
     menu_output.append("#### 🛠️ Customizations & Options")
-    customizations = [
+    menu_output.extend([
         "* **Milk options:** Whole (default), 2%, Oat, Almond, 2% Lactose Free. *(Note: Soy milk is out of stock today)*",
         "* **Espresso shots:** Single, Double (default), Triple, Quadruple",
         "* **Caffeine options:** Regular (default), Decaf",
         "* **Temperature:** Hot (default), Iced",
-        "* **Sweeteners:** Vanilla, Hazelnut, Caramel sauce, Chocolate sauce, Sugar-free vanilla"
-    ]
-    menu_output.extend(customizations)
-
+        "* **Sweeteners:** Vanilla, Hazelnut, Caramel sauce, Chocolate sauce, Sugar-free vanilla",
+    ])
+ 
     return "\n".join(menu_output)
 
-
-@tool
-def get_full_menu() -> str:
-    """Retrieve the entire cafe menu. Use immediately after getting the user name and email."""
-    return "\n".join(MENU_DOCS)
 
 
 @tool

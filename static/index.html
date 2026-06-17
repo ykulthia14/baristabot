@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   <script src="https://sandbox.web.squarecdn.com/v1/square.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -112,7 +113,16 @@
       text-align: center;
     }
 
-    /* ── Typing indicator ── */
+    .bubble.bot h3 { font-family: 'DM Serif Display', serif; font-size: 1rem; margin: 12px 0 6px; color: var(--roast); }
+    .bubble.bot h4 { font-size: 0.85rem; font-weight: 600; margin: 10px 0 4px; color: var(--mid); text-transform: uppercase; letter-spacing: 0.04em; }
+    .bubble.bot table { width: 100%; border-collapse: collapse; margin: 4px 0 8px; font-size: 13px; }
+    .bubble.bot th, .bubble.bot td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--steam); }
+    .bubble.bot th { font-weight: 600; color: var(--mid); font-size: 12px; }
+    .bubble.bot ul { padding-left: 16px; margin: 4px 0; }
+    .bubble.bot li { margin: 3px 0; font-size: 13px; }
+    .bubble.bot strong { font-weight: 600; color: var(--ink); }
+    .bubble.bot em { color: var(--mid); font-style: italic; }
+    .bubble.bot p { margin: 4px 0; }
     .typing { align-self: flex-start; display: flex; gap: 5px; padding: 14px 16px; background: var(--foam); border-radius: 18px; border-bottom-left-radius: 4px; }
     .typing span { width: 7px; height: 7px; background: var(--steam); border-radius: 50%; animation: bounce 1.2s infinite; }
     .typing span:nth-child(2) { animation-delay: .2s; }
@@ -278,7 +288,11 @@
   function addBubble(role, text) {
     const div = document.createElement('div');
     div.className = `bubble ${role}`;
-    div.textContent = text;
+    if (role === 'bot' && window.marked) {
+      div.innerHTML = marked.parse(text);
+    } else {
+      div.textContent = text;
+    }
     chatEl.appendChild(div);
     chatEl.scrollTop = chatEl.scrollHeight;
     return div;
