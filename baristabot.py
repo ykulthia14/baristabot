@@ -1,10 +1,10 @@
-# baristabot.py — BaristaBot backend with Pydantic validation
+# baristabot.py — BaristaBot backend with Pydantic validation + discount feature
 from __future__ import annotations
 
 import os
 import uuid
 from collections.abc import Iterable
-from random import randint
+from random import randint, choice
 from typing import Annotated, Literal
 
 import resend
@@ -32,38 +32,33 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 from typing_extensions import TypedDict
 
-# ── Environment ───────────────────────────────────────────────────────────────
 load_dotenv()
 
 api_key = os.environ.get("GOOGLE_API_KEY")
 if not api_key:
-    raise ValueError("GOOGLE_API_KEY not found. Please check your .env file.")
+    raise ValueError("GOOGLE_API_KEY not found.")
 
 resend.api_key = os.environ.get("RESEND_API_KEY")
 if not resend.api_key:
-    raise ValueError("RESEND_API_KEY not found. Please check your .env file.")
+    raise ValueError("RESEND_API_KEY not found.")
 
 SQUARE_ACCESS_TOKEN = os.environ.get("SQUARE_ACCESS_TOKEN")
 SQUARE_APP_ID = os.environ.get("SQUARE_APP_ID")
 SQUARE_LOCATION_ID = os.environ.get("SQUARE_LOCATION_ID")
 
 if not SQUARE_ACCESS_TOKEN or not SQUARE_APP_ID or not SQUARE_LOCATION_ID:
-    raise ValueError(
-        "SQUARE_ACCESS_TOKEN, SQUARE_APP_ID, and SQUARE_LOCATION_ID must be set in your .env file."
-    )
+    raise ValueError("SQUARE_ACCESS_TOKEN, SQUARE_APP_ID, and SQUARE_LOCATION_ID must be set.")
 
-_square_client = Square(
-    token=SQUARE_ACCESS_TOKEN,
-    environment=SquareEnvironment.SANDBOX,
-)
+_square_client = Square(token=SQUARE_ACCESS_TOKEN, environment=SquareEnvironment.SANDBOX)
+
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "orders@yourdomain.com")
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class OrderItem(BaseModel):
-    """A single validated item in the customer's order."""
-    description: str = Field(min_length=1, description="Human-readable drink description")
-    price: float = Field(ge=0.0, description="Price in USD")
+    description: str = Field(min_length=1)
+    price: float = Field(ge=0.0)
 
     @field_validator("price")
     @classmethod
@@ -75,7 +70,6 @@ class OrderItem(BaseModel):
 
 
 class AddToOrderArgs(BaseModel):
-    """Validated arguments for the add_to_order tool call."""
     drink: str = Field(min_length=1)
     modifiers: list[str] = Field(default_factory=list)
 
@@ -91,7 +85,6 @@ class AddToOrderArgs(BaseModel):
 
 
 class PlaceOrderArgs(BaseModel):
-    """Validated arguments for the place_order_and_email tool call."""
     name: str = Field(min_length=1)
     email: EmailStr
 
@@ -102,7 +95,6 @@ class PlaceOrderArgs(BaseModel):
 
 
 class PaymentResult(BaseModel):
-    """Parsed result from a Square charge attempt."""
     success: bool
     payment_id: str | None = None
     error: str | None = None
@@ -117,7 +109,6 @@ class PaymentResult(BaseModel):
 
 
 class OrderSummary(BaseModel):
-    """Aggregated order used for display and email."""
     items: list[OrderItem] = Field(default_factory=list)
 
     @property
@@ -131,10 +122,28 @@ class OrderSummary(BaseModel):
         return len(self.items) == 0
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+class DiscountOffer(BaseModel):
+    code: str
+    percent: int = Field(ge=5, le=50)
+    description: str
+
+    def apply(self, total: float) -> float:
+        return round(total * (1 - self.percent / 100), 2)
+
+    def display(self) -> str:
+        return f"{self.code} — {self.percent}% off"
+
+
+DISCOUNT_OFFERS = [
+    DiscountOffer(code="COMEBACK10", percent=10, description="10% off for giving us another chance"),
+    DiscountOffer(code="STAYFORME15", percent=15, description="15% off because we would love to keep you"),
+    DiscountOffer(code="ONEUS20", percent=20, description="20% off — our treat"),
+]
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def order_items_from_state(raw: list) -> list[OrderItem]:
-    """Deserialize raw state dicts into validated OrderItem models."""
     result = []
     for item in raw:
         if isinstance(item, OrderItem):
@@ -148,55 +157,58 @@ def order_items_from_state(raw: list) -> list[OrderItem]:
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
+
 class OrderState(TypedDict):
     messages: Annotated[list, add_messages]
-    order: list[dict]   # serialized OrderItem dicts (LangGraph requires plain dicts)
+    order: list[dict]
     finished: bool
+    discount_offered: bool
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── System prompt ─────────────────────────────────────────────────────────────
+
 BARISTABOT_SYSINT = (
     "system",
     "You are BaristaBot, a friendly cafe ordering assistant. Follow these steps strictly:\n\n"
     "STEP 1 - COLLECT CONTACT INFO:\n"
-    "Ask for the customer's name and email address before anything else. "
-    "Do not proceed until you have BOTH. If they try to order first, politely remind them you need "
-    "their name and email first. If the email looks invalid (no @ or no domain), ask them to confirm it.\n\n"
+    "Ask for the customer name and email address before anything else. "
+    "Do not proceed until you have BOTH. If they try to order first, remind them you need "
+    "their name and email first. If the email looks invalid, ask them to confirm it.\n\n"
     "STEP 2 - SHOW MENU:\n"
-    "Once you have name and email, call get_full_menu and display the full menu clearly. "
-    "Then ask what they'd like to order.\n\n"
+    "Once you have name and email, call get_full_menu and display it clearly. "
+    "Then ask what they would like to order.\n\n"
     "STEP 3 - TAKE THE ORDER:\n"
     "Add items with add_to_order. Rules:\n"
-    "- Soy milk is OUT OF STOCK today. If requested, apologize and suggest an alternative "
-    "(oat, almond, whole, 2%, lactose-free).\n"
-    "- If a customer asks for something not on the menu, politely say it is not available.\n"
-    "- If a customer wants to modify an item already added, call clear_order and re-add all items.\n"
+    "- Soy milk is OUT OF STOCK today. If requested, apologize and suggest an alternative.\n"
+    "- If a customer asks for something not on the menu, say it is not available.\n"
+    "- If a customer wants to modify an added item, call clear_order and re-add all items.\n"
     "- If a customer wants to cancel entirely, confirm then call clear_order and say goodbye.\n\n"
     "STEP 4 - CONFIRM ORDER:\n"
-    "Before payment, call get_order to review, then call confirm_order to show the customer. "
-    "If the order is empty, do not proceed - ask what they would like. "
+    "Call get_order to review, then call confirm_order. "
+    "If the order is empty, do not proceed. "
     "If the customer wants changes after confirming, call clear_order and re-take the order.\n\n"
     "STEP 5 - PAYMENT:\n"
-    "Only call pay_order after the customer confirms the order is correct. "
+    "Only call pay_order after the customer confirms. "
     "If payment fails, inform the customer and ask them to try again.\n\n"
     "STEP 6 - COMPLETE:\n"
-    "Only after pay_order succeeds, call place_order_and_email with the customer's name and email. "
+    "Only after pay_order succeeds, call place_order_and_email with the customer name and email. "
     "Then thank them, confirm the receipt was emailed, and say goodbye.\n\n"
     "GENERAL RULES:\n"
     "- Only answer questions about the menu and current order. For anything else say: "
     "I am here to help with your order - is there anything from our menu I can get for you?\n"
     "- Never make up menu items or prices. Always use lookup_price for pricing.\n"
+    "- If the customer seems disinterested, hesitant, says things are too expensive, says never mind, "
+    "not interested, maybe later, or anything suggesting they will not order, "
+    "call offer_discount ONCE before letting them go. Do not offer a discount more than once per session.\n"
     "- Be warm, concise, and helpful."
 )
 
 WELCOME_MSG = "Welcome to the BaristaBot cafe! Before we get started, could I please get your name and email address?"
 
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "orders@yourdomain.com")
+# ── LLM + Menu ────────────────────────────────────────────────────────────────
 
-# ── LLM ───────────────────────────────────────────────────────────────────────
 llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0.2)
 
-# ── Menu vector store ─────────────────────────────────────────────────────────
 MENU_DOCS = [
     "Coffee Drinks (no milk): Espresso, Americano, Cold Brew.",
     "Coffee Drinks with Milk: Latte, Cappuccino, Cortado, Macchiato, Mocha, Flat White.",
@@ -207,12 +219,9 @@ MENU_DOCS = [
     "Espresso shots: Single, Double (default), Triple, Quadruple.",
     "Caffeine options: Regular (default), Decaf.",
     "Temperature: Hot (default), Iced.",
-    "Sweeteners (add one or more): vanilla sweetener, hazelnut sweetener, caramel sauce, "
-    "chocolate sauce, sugar free vanilla sweetener. Sweetened means plain sugar.",
-    "Special requests: any reasonable modifier not involving off-menu items, e.g. extra hot, "
-    "one pump, half caff, extra foam.",
-    "Dirty means add a shot of espresso to a drink that does not normally contain it, "
-    "e.g. Dirty Chai Latte.",
+    "Sweeteners: vanilla sweetener, hazelnut sweetener, caramel sauce, chocolate sauce, sugar free vanilla sweetener.",
+    "Special requests: extra hot, one pump, half caff, extra foam.",
+    "Dirty means add a shot of espresso to a drink that does not normally contain it.",
     "Regular milk is the same as whole milk.",
 ]
 
@@ -236,6 +245,7 @@ menu_retriever = menu_vectorstore.as_retriever(search_kwargs={"k": 3})
 
 
 # ── Square ────────────────────────────────────────────────────────────────────
+
 def charge_square(nonce: str, amount_cents: int) -> str:
     try:
         result = _square_client.payments.create(
@@ -250,56 +260,87 @@ def charge_square(nonce: str, amount_cents: int) -> str:
         return f"payment_failed:{error_details}"
 
 
-# ── Auto tools ────────────────────────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────────────────────
+
 @tool
 def get_menu(query: str) -> str:
-    """Retrieve relevant menu sections for a given customer query.
-
-    Args:
-        query: The customer's question or the item they mentioned.
-    Returns:
-        Relevant menu sections as a single string.
+    """Retrieve the entire cafe menu with pricing and structural sections.
+    Use immediately after getting the user name and email.
     """
-    docs = menu_retriever.invoke(query)
-    return "\n".join(doc.page_content for doc in docs)
+    sections = {
+        "☕ Coffee Drinks (No Milk)": ["espresso", "americano", "cold brew"],
+        "🥛 Coffee Drinks with Milk": ["latte", "cappuccino", "cortado", "macchiato", "mocha", "flat white"],
+        "🍃 Tea Drinks (No Milk)": ["english breakfast tea", "green tea", "earl grey"],
+        "🍵 Tea Drinks with Milk": ["chai latte", "matcha latte", "london fog"],
+        "✨ Other Drinks": ["steamer", "hot chocolate"]
+    }
+
+    menu_output = ["### 📜 Our Menu\n"]
+
+    for section_name, items in sections.items():
+        menu_output.append(f"#### {section_name}")
+        menu_output.append("| Item | Price |")
+        menu_output.append("| :--- | :--- |")
+        for item in items:
+            price = MENU_PRICES.get(item, 0.00)
+            display_name = item.title()
+            menu_output.append(f"| {display_name} | ${price:.2f} |")
+        menu_output.append("")
+
+    
+    menu_output.append("#### 🛠️ Customizations & Options")
+    customizations = [
+        "* **Milk options:** Whole (default), 2%, Oat, Almond, 2% Lactose Free. *(Note: Soy milk is out of stock today)*",
+        "* **Espresso shots:** Single, Double (default), Triple, Quadruple",
+        "* **Caffeine options:** Regular (default), Decaf",
+        "* **Temperature:** Hot (default), Iced",
+        "* **Sweeteners:** Vanilla, Hazelnut, Caramel sauce, Chocolate sauce, Sugar-free vanilla"
+    ]
+    menu_output.extend(customizations)
+
+    return "\n".join(menu_output)
+
 
 @tool
 def get_full_menu() -> str:
-    """Retrieve the entire cafe menu. Use immediately after getting the user's name and email."""
+    """Retrieve the entire cafe menu. Use immediately after getting the user name and email."""
     return "\n".join(MENU_DOCS)
 
 
-# ── Order tools (stubs — logic lives in order_node) ───────────────────────────
 @tool
 def add_to_order(drink: str, modifiers: Iterable[str]) -> str:
-    """Adds the specified drink to the customer's order, including any modifiers.
+    """Adds the specified drink to the customer order, including any modifiers.
 
     Args:
         drink: Name of the drink to add.
-        modifiers: List of modifier strings (e.g. ["oat milk", "iced"]).
+        modifiers: List of modifier strings (e.g. oat milk, iced).
     Returns:
         The current list of items in the order as a string.
     """
     raise NotImplementedError("Handled by order_node")
+
 
 @tool
 def confirm_order() -> str:
     """Asks the customer if the order is correct.
 
     Returns:
-        The user's free-text response.
+        The user free-text response.
     """
     raise NotImplementedError("Handled by order_node")
 
+
 @tool
 def get_order() -> str:
-    """Returns the user's order so far. One item per line."""
+    """Returns the user order so far. One item per line."""
     raise NotImplementedError("Handled by order_node")
+
 
 @tool
 def clear_order() -> str:
-    """Removes all items from the user's order."""
+    """Removes all items from the user order."""
     raise NotImplementedError("Handled by order_node")
+
 
 @tool
 def pay_order() -> str:
@@ -311,29 +352,46 @@ def pay_order() -> str:
     """
     raise NotImplementedError("Handled by order_node")
 
+
 @tool
 def place_order_and_email(name: str, email: str) -> int:
     """Sends the order to the barista and emails the bill to the customer.
 
     Args:
-        name: Customer's name.
-        email: Customer's email address.
+        name: Customer name.
+        email: Customer email address.
     Returns:
         The estimated number of minutes until the order is ready.
     """
     raise NotImplementedError("Handled by order_node")
 
 
+@tool
+def offer_discount() -> str:
+    """Offers the customer a discount coupon when they seem disinterested,
+    hesitant, say things are too expensive, or are about to leave without ordering.
+    Only call this ONCE per session.
+    Returns:
+        Whether the customer accepted the discount and what code was applied.
+    """
+    raise NotImplementedError("Handled by order_node")
+
+
 # ── Tool sets ─────────────────────────────────────────────────────────────────
+
 auto_tools = [get_menu, get_full_menu]
-order_tools = [add_to_order, confirm_order, get_order, clear_order, pay_order, place_order_and_email]
+order_tools = [
+    add_to_order, confirm_order, get_order, clear_order,
+    pay_order, place_order_and_email, offer_discount,
+]
 tool_node = ToolNode(auto_tools)
 llm_with_tools = llm.bind_tools(auto_tools + order_tools)
 
 
 # ── Graph nodes ───────────────────────────────────────────────────────────────
+
 def chatbot_node(state: OrderState) -> OrderState:
-    defaults: OrderState = {"order": [], "finished": False}
+    defaults: OrderState = {"order": [], "finished": False, "discount_offered": False}
     if state["messages"]:
         new_output = llm_with_tools.invoke([BARISTABOT_SYSINT] + state["messages"])
     else:
@@ -352,6 +410,7 @@ def order_node(state: OrderState) -> OrderState:
     order: list[OrderItem] = order_items_from_state(state.get("order", []))
     outbound_msgs: list[ToolMessage] = []
     order_placed = False
+    discount_offered: bool = state.get("discount_offered", False)
 
     for tool_call in tool_msg.tool_calls:
         name = tool_call["name"]
@@ -366,10 +425,9 @@ def order_node(state: OrderState) -> OrderState:
                 outbound_msgs.append(ToolMessage(content=response, name=name, tool_call_id=tool_call["id"]))
                 continue
 
-            # Reject out-of-stock soy milk before it enters the order
             all_text = args.drink + " " + " ".join(args.modifiers)
             if "soy" in all_text:
-                response = "Error: Soy milk is out of stock today. Please choose another milk option (oat, almond, whole, 2%, lactose-free)."
+                response = "Error: Soy milk is out of stock today. Please choose oat, almond, whole, 2%, or lactose-free."
                 outbound_msgs.append(ToolMessage(content=response, name=name, tool_call_id=tool_call["id"]))
                 continue
 
@@ -412,10 +470,53 @@ def order_node(state: OrderState) -> OrderState:
                 continue
             raw_result = interrupt(
                 f"Your total is **${summary.total:.2f}**. "
-                "Please complete payment with card details."
+                "Please complete payment with your card details."
             )
             payment = PaymentResult.from_string(str(raw_result))
             response = "payment_success" if payment.success else f"Payment failed: {payment.error}"
+
+        # ── offer_discount ────────────────────────────────────────────────────
+        elif name == "offer_discount":
+            if discount_offered:
+                response = "Discount already offered this session. Do not offer again."
+                outbound_msgs.append(ToolMessage(content=response, name=name, tool_call_id=tool_call["id"]))
+                continue
+
+            offer = choice(DISCOUNT_OFFERS)
+            discount_offered = True
+            summary = OrderSummary(items=order)
+
+            if summary.is_empty():
+                user_response = interrupt(
+                    f"We would love to have you! Here is a special offer just for you:\n\n"
+                    f"Use code **{offer.code}** for **{offer.percent}% off** your entire order.\n\n"
+                    f"Would you like to go ahead and order?"
+                )
+            else:
+                discounted_total = offer.apply(summary.total)
+                user_response = interrupt(
+                    f"We do not want to lose you! Here is a special offer:\n\n"
+                    f"Code **{offer.code}** — **{offer.percent}% off** your order!\n"
+                    f"Your new total would be **${discounted_total:.2f}** instead of ${summary.total:.2f}.\n\n"
+                    f"Would you like to go ahead with this discount?"
+                )
+
+            accepted = any(
+                word in str(user_response).lower()
+                for word in {"yes", "sure", "ok", "okay", "deal", "accept", "yeah", "great", "sounds good"}
+            )
+
+            if accepted and not summary.is_empty():
+                factor = 1 - offer.percent / 100
+                order = [
+                    OrderItem(description=i.description, price=round(i.price * factor, 2))
+                    for i in order
+                ]
+                response = f"Discount applied! Code {offer.code} ({offer.percent}% off). User response: {user_response}"
+            elif accepted:
+                response = f"Discount code {offer.code} noted. User wants to order now. User response: {user_response}"
+            else:
+                response = f"Customer declined the discount. User response: {user_response}"
 
         # ── place_order_and_email ─────────────────────────────────────────────
         elif name == "place_order_and_email":
@@ -445,7 +546,7 @@ def order_node(state: OrderState) -> OrderState:
             html_body = (
                 "<h2>&#9749; Your BaristaBot Order</h2>"
                 f"<p>Hi {args.name}, thanks for your order!</p>"
-                f"<h3>Order Summary</h3>"
+                "<h3>Order Summary</h3>"
                 f"<table style='font-family:sans-serif;font-size:14px'>{html_rows}</table>"
                 f"<p><strong>Estimated wait:</strong> {eta} minute(s)</p>"
                 "<p>See you soon!</p>"
@@ -485,15 +586,16 @@ def order_node(state: OrderState) -> OrderState:
             ToolMessage(content=response, name=name, tool_call_id=tool_call["id"])
         )
 
-    # Serialize Pydantic models back to plain dicts for LangGraph state storage
     return {
         "messages": outbound_msgs,
         "order": [i.model_dump() for i in order],
         "finished": order_placed,
+        "discount_offered": discount_offered,
     }
 
 
 # ── Routing ───────────────────────────────────────────────────────────────────
+
 def route_after_chatbot(state: OrderState) -> str:
     if state.get("finished", False):
         return END
@@ -513,6 +615,7 @@ def route_after_human(state: OrderState) -> Literal["chatbot", "__end__"]:
 
 
 # ── Graph assembly ────────────────────────────────────────────────────────────
+
 def _build_graph(checkpointer=None):
     builder = StateGraph(OrderState)
     builder.add_node("chatbot", chatbot_node)
@@ -528,6 +631,7 @@ def _build_graph(checkpointer=None):
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL and _POSTGRES_AVAILABLE:
     connection_pool = ConnectionPool(
@@ -549,6 +653,7 @@ graph_with_persistence = _build_graph(checkpointer=memory)
 
 
 # ── CLI runner ────────────────────────────────────────────────────────────────
+
 def run_session(thread_id: str | None = None) -> str:
     if thread_id is None:
         thread_id = str(uuid.uuid4())
