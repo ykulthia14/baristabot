@@ -272,6 +272,15 @@
   let paymentTotalCents = 0;
   let squareAppId = '';
   let squareLocationId = '';
+  let inactivityTimer = null;
+
+  const INACTIVITY_MS = 30_000;
+  const NUDGE_MESSAGES = [
+    "Still there? ☕ Take your time — I’m here whenever you’re ready to order!",
+    "No rush at all! Can I help you find something you’d enjoy, or answer any questions?",
+    "Just checking in! Let me know if you’d like to hear about today’s specials.",
+  ];
+  let nudgeIndex = 0;
 
   // ── DOM refs ───────────────────────────────────────────────────────────────
   const chatEl      = document.getElementById('chat');
@@ -309,6 +318,24 @@
 
   function hideTyping() {
     document.getElementById('typing')?.remove();
+  }
+
+  // ── Inactivity nudge ──────────────────────────────────────────────────────
+  function startInactivityTimer() {
+    clearTimeout(inactivityTimer);
+    inactivityTimer = setTimeout(() => {
+      const msg = NUDGE_MESSAGES[nudgeIndex % NUDGE_MESSAGES.length];
+      nudgeIndex++;
+      addBubble('bot', msg);
+      // Schedule another nudge if still inactive
+      startInactivityTimer();
+    }, INACTIVITY_MS);
+  }
+
+  function resetInactivityTimer() {
+    clearTimeout(inactivityTimer);
+    inactivityTimer = null;
+    nudgeIndex = 0;
   }
 
   function renderMessages(messages) {
@@ -414,6 +441,7 @@
     inputEl.style.height = 'auto';
     addBubble('user', text);
     setInputEnabled(false);
+    resetInactivityTimer(); // stop nudging while bot is thinking
     showTyping();
 
     try {
@@ -426,10 +454,12 @@
       hideTyping();
       renderMessages(data.messages);
       await handleInterrupt(data.interrupt);
+      startInactivityTimer(); // start 30s countdown after bot replies
     } catch (err) {
       hideTyping();
       addBubble('system', 'Something went wrong. Please try again.');
       setInputEnabled(true);
+      startInactivityTimer();
     }
   }
 
@@ -449,6 +479,8 @@
   async function init() {
     chatEl.innerHTML = '';
     backdrop.classList.remove('open');
+    resetInactivityTimer();
+    nudgeIndex = 0;
     setInputEnabled(false);
     showTyping();
 
@@ -466,6 +498,7 @@
       hideTyping();
       renderMessages(data.messages);
       await handleInterrupt(data.interrupt);
+      startInactivityTimer(); // begin nudge countdown after welcome message
     } catch (err) {
       hideTyping();
       addBubble('system', 'Could not connect to BaristaBot. Is the server running?');
