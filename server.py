@@ -48,10 +48,12 @@ def get_messages(thread_id: str) -> list[dict]:
     messages = state.values.get("messages", [])
     result = []
     for msg in messages:
-        if msg.type in ("tool", "system"):
+        if msg.type == "system":
             continue
         text = extract_text(msg.content)
         if msg.type == "ai" and text.strip():
+            result.append({"role": "assistant", "text": text})
+        elif msg.type == "tool" and text.strip():
             result.append({"role": "assistant", "text": text})
         elif msg.type == "human":
             result.append({"role": "user", "text": text})
