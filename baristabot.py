@@ -59,14 +59,29 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "orders@yourdomain.com")
 class OrderItem(BaseModel):
     description: str = Field(min_length=1)
     price: float = Field(ge=0.0)
+    original_price: float = Field(ge=0.0, default=0.0)
 
-    @field_validator("price")
+    def model_post_init(self, __context) -> None:
+        # Always seed original_price from price on first creation
+        if self.original_price == 0.0 and self.price > 0.0:
+            object.__setattr__(self, "original_price", self.price)
+
+    @field_validator("price", "original_price")
     @classmethod
     def round_price(cls, v: float) -> float:
         return round(v, 2)
 
-    def display(self) -> str:
-        return f"{self.description} (${self.price:.2f})"
+    def effective_price(self, discount_percent: int = 0) -> float:
+        """Always apply discount to original_price, never to already-discounted price."""
+        if discount_percent > 0:
+            return round(self.original_price * (1 - discount_percent / 100), 2)
+        return self.original_price
+
+    def display(self, discount_percent: int = 0) -> str:
+        ep = self.effective_price(discount_percent)
+        if discount_percent > 0 and ep != self.original_price:
+            return f"{self.description} (~~${self.original_price:.2f}~~ **${ep:.2f}**)"
+        return f"{self.description} (${ep:.2f})"
 
 
 class AddToOrderArgs(BaseModel):
@@ -110,13 +125,17 @@ class PaymentResult(BaseModel):
 
 class OrderSummary(BaseModel):
     items: list[OrderItem] = Field(default_factory=list)
+    discount_percent: int = Field(default=0, ge=0, le=100)
 
-    @property
     def total(self) -> float:
-        return round(sum(item.price for item in self.items), 2)
+        """Total always computed from original_price to prevent compounding."""
+        return round(sum(i.effective_price(self.discount_percent) for i in self.items), 2)
+
+    def original_total(self) -> float:
+        return round(sum(i.original_price for i in self.items), 2)
 
     def display_lines(self) -> list[str]:
-        return [item.display() for item in self.items]
+        return [i.display(self.discount_percent) for i in self.items]
 
     def is_empty(self) -> bool:
         return len(self.items) == 0
@@ -163,6 +182,8 @@ class OrderState(TypedDict):
     order: list[dict]
     finished: bool
     discount_offered: bool
+    payment_confirmed: bool  # set True ONLY when Square charge succeeds
+    active_discount_percent: int  # stored here, never mutates item prices
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -175,10 +196,7 @@ BARISTABOT_SYSINT = (
     "Do not proceed until you have BOTH. If they try to order first, remind them you need "
     "their name and email first. If the email looks invalid, ask them to confirm it.\n\n"
     "STEP 2 - SHOW MENU:\n"
-    "Once you have name and email, call get_full_menu. "
-    "You must explicitly repeat and print the entire menu text returned by the tool "
-    "directly inside your chat response message so the customer can read it. "
-    "Do not just say 'look at the menu above'—include the menu tables in your reply. "
+    "Once you have name and email, call get_full_menu and display it clearly. "
     "Then ask what they would like to order.\n\n"
     "STEP 3 - TAKE THE ORDER:\n"
     "Add items with add_to_order. Rules:\n"
@@ -199,7 +217,7 @@ BARISTABOT_SYSINT = (
     "GENERAL RULES:\n"
     "- Only answer questions about the menu and current order. For anything else say: "
     "I am here to help with your order - is there anything from our menu I can get for you?\n"
-    "- Never make up menu items or prices. Always use lookup_price for pricing.\n"
+    "- Never make up menu items or prices. Use the pricing tools and configured add-on prices to determine the final cost.\n"
     "- If the customer seems disinterested, hesitant, says things are too expensive, says never mind, "
     "not interested, maybe later, or anything suggesting they will not order, "
     "call offer_discount ONCE before letting them go. Do not offer a discount more than once per session.\n"
@@ -236,6 +254,13 @@ MENU_PRICES: dict[str, float] = {
     "chai latte": 4.50, "matcha latte": 5.00, "london fog": 4.50,
     "steamer": 3.50, "hot chocolate": 4.00,
 }
+SWEETENER_PRICES = {
+    "vanilla sweetener": 0.50,
+    "hazelnut sweetener": 0.50,
+    "caramel sauce": 0.75,
+    "chocolate sauce": 0.75,
+    "sugar free vanilla sweetener": 0.50,
+}
 
 def lookup_price(drink: str) -> float:
     return MENU_PRICES.get(drink.strip().lower(), 0.00)
@@ -268,7 +293,7 @@ def charge_square(nonce: str, amount_cents: int) -> str:
 @tool
 def get_menu(query: str) -> str:
     """Retrieve relevant menu sections for a given customer query.
- 
+
     Args:
         query: The customer question or item they mentioned.
     Returns:
@@ -276,8 +301,8 @@ def get_menu(query: str) -> str:
     """
     docs = menu_retriever.invoke(query)
     return "\n".join(doc.page_content for doc in docs)
- 
- 
+
+
 @tool
 def get_full_menu() -> str:
     """Retrieve the entire cafe menu with pricing and structural sections.
@@ -290,9 +315,9 @@ def get_full_menu() -> str:
         "🍵 Tea Drinks with Milk": ["chai latte", "matcha latte", "london fog"],
         "✨ Other Drinks": ["steamer", "hot chocolate"],
     }
- 
+
     menu_output = ["### 📜 Our Menu\n"]
- 
+
     for section_name, items in sections.items():
         menu_output.append(f"#### {section_name}")
         menu_output.append("| Item | Price |")
@@ -301,18 +326,25 @@ def get_full_menu() -> str:
             price = MENU_PRICES.get(item, 0.00)
             menu_output.append(f"| {item.title()} | ${price:.2f} |")
         menu_output.append("")
- 
+
     menu_output.append("#### 🛠️ Customizations & Options")
     menu_output.extend([
         "* **Milk options:** Whole (default), 2%, Oat, Almond, 2% Lactose Free. *(Note: Soy milk is out of stock today)*",
         "* **Espresso shots:** Single, Double (default), Triple, Quadruple",
         "* **Caffeine options:** Regular (default), Decaf",
         "* **Temperature:** Hot (default), Iced",
-        "* **Sweeteners:** Vanilla, Hazelnut, Caramel sauce, Chocolate sauce, Sugar-free vanilla",
     ])
- 
-    return "\n".join(menu_output)
+    menu_output.append("")
 
+    menu_output.append("#### 🍯 Sweetener Add-ons")
+    menu_output.append("| Sweetener | Price |")
+    menu_output.append("| :--- | :--- |")
+    for sweetener, price in SWEETENER_PRICES.items():
+        menu_output.append(f"| {sweetener.title()} | +${price:.2f} |")
+    menu_output.append("")
+
+
+    return "\n".join(menu_output)
 
 
 @tool
@@ -399,7 +431,7 @@ llm_with_tools = llm.bind_tools(auto_tools + order_tools)
 # ── Graph nodes ───────────────────────────────────────────────────────────────
 
 def chatbot_node(state: OrderState) -> OrderState:
-    defaults: OrderState = {"order": [], "finished": False, "discount_offered": False}
+    defaults: OrderState = {"order": [], "finished": False, "discount_offered": False, "payment_confirmed": False, "active_discount_percent": 0}
     if state["messages"]:
         new_output = llm_with_tools.invoke([BARISTABOT_SYSINT] + state["messages"])
     else:
@@ -419,6 +451,8 @@ def order_node(state: OrderState) -> OrderState:
     outbound_msgs: list[ToolMessage] = []
     order_placed = False
     discount_offered: bool = state.get("discount_offered", False)
+    payment_confirmed: bool = state.get("payment_confirmed", False)
+    active_discount_percent: int = state.get("active_discount_percent", 0)
 
     for tool_call in tool_msg.tool_calls:
         name = tool_call["name"]
@@ -440,6 +474,9 @@ def order_node(state: OrderState) -> OrderState:
                 continue
 
             price = lookup_price(args.drink)
+            for modifier in args.modifiers:
+                price += SWEETENER_PRICES.get(modifier, 0.00)
+            price = round(price, 2)
             modifier_str = ", ".join(args.modifiers) if args.modifiers else "no modifiers"
             item = OrderItem(description=f"{args.drink} ({modifier_str})", price=price)
             order.append(item)
@@ -447,41 +484,46 @@ def order_node(state: OrderState) -> OrderState:
 
         # ── confirm_order ─────────────────────────────────────────────────────
         elif name == "confirm_order":
-            summary = OrderSummary(items=order)
+            summary = OrderSummary(items=order, discount_percent=active_discount_percent)
             if summary.is_empty():
                 response = "Error: The order is empty. Please add items before confirming."
                 outbound_msgs.append(ToolMessage(content=response, name=name, tool_call_id=tool_call["id"]))
                 continue
             lines = "\n".join(summary.display_lines())
-            response = interrupt(f"Your order:\n{lines}\nTotal: ${summary.total:.2f}\n\nIs this correct?")
+            response = interrupt(f"Your order:\n{lines}\nTotal: ${summary.total():.2f}\n\nIs this correct?")
 
         # ── get_order ─────────────────────────────────────────────────────────
         elif name == "get_order":
-            summary = OrderSummary(items=order)
+            summary = OrderSummary(items=order, discount_percent=active_discount_percent)
             if summary.is_empty():
                 response = "(no items in order)"
             else:
                 lines = "\n".join(summary.display_lines())
-                response = f"{lines}\nTotal: ${summary.total:.2f}"
+                response = f"{lines}\nTotal: ${summary.total():.2f}"
 
         # ── clear_order ───────────────────────────────────────────────────────
         elif name == "clear_order":
             order.clear()
+            active_discount_percent = 0  # reset discount when order is cleared
             response = "Order cleared."
 
         # ── pay_order ─────────────────────────────────────────────────────────
         elif name == "pay_order":
-            summary = OrderSummary(items=order)
+            summary = OrderSummary(items=order, discount_percent=active_discount_percent)
             if summary.is_empty():
                 response = "Error: Cannot process payment for an empty order."
                 outbound_msgs.append(ToolMessage(content=response, name=name, tool_call_id=tool_call["id"]))
                 continue
             raw_result = interrupt(
-                f"Your total is **${summary.total:.2f}**. "
+                f"Your total is **${summary.total():.2f}**. "
                 "Please complete payment with your card details."
             )
             payment = PaymentResult.from_string(str(raw_result))
-            response = "payment_success" if payment.success else f"Payment failed: {payment.error}"
+            if payment.success:
+                payment_confirmed = True
+                response = "payment_success"
+            else:
+                response = f"Payment failed: {payment.error}"
 
         # ── offer_discount ────────────────────────────────────────────────────
         elif name == "offer_discount":
@@ -492,7 +534,7 @@ def order_node(state: OrderState) -> OrderState:
 
             offer = choice(DISCOUNT_OFFERS)
             discount_offered = True
-            summary = OrderSummary(items=order)
+            summary = OrderSummary(items=order, discount_percent=active_discount_percent)
 
             if summary.is_empty():
                 user_response = interrupt(
@@ -505,7 +547,7 @@ def order_node(state: OrderState) -> OrderState:
                 user_response = interrupt(
                     f"We do not want to lose you! Here is a special offer:\n\n"
                     f"Code **{offer.code}** — **{offer.percent}% off** your order!\n"
-                    f"Your new total would be **${discounted_total:.2f}** instead of ${summary.total:.2f}.\n\n"
+                    f"Your new total would be **${discounted_total:.2f}** instead of ${summary.total():.2f}.\n\n"
                     f"Would you like to go ahead with this discount?"
                 )
 
@@ -514,20 +556,29 @@ def order_node(state: OrderState) -> OrderState:
                 for word in {"yes", "sure", "ok", "okay", "deal", "accept", "yeah", "great", "sounds good"}
             )
 
-            if accepted and not summary.is_empty():
-                factor = 1 - offer.percent / 100
-                order = [
-                    OrderItem(description=i.description, price=round(i.price * factor, 2))
-                    for i in order
-                ]
-                response = f"Discount applied! Code {offer.code} ({offer.percent}% off). User response: {user_response}"
-            elif accepted:
-                response = f"Discount code {offer.code} noted. User wants to order now. User response: {user_response}"
+            if accepted:
+                # Store discount percent in state — never mutate item prices
+                # so discounts cannot compound on clear+re-add or repeated offers
+                active_discount_percent = offer.percent
+                if not summary.is_empty():
+                    response = f"Discount applied! Code {offer.code} ({offer.percent}% off). User response: {user_response}"
+                else:
+                    response = f"Discount code {offer.code} noted for next order. User response: {user_response}"
             else:
                 response = f"Customer declined the discount. User response: {user_response}"
 
         # ── place_order_and_email ─────────────────────────────────────────────
         elif name == "place_order_and_email":
+            # Hard server-side guard — LLM cannot bypass this regardless of prompt injection
+            if not payment_confirmed:
+                response = (
+                    "Error: Payment has not been confirmed. "
+                    "You must call pay_order and receive a successful payment before placing the order. "
+                    "Do not call place_order_and_email until payment_confirmed is True."
+                )
+                outbound_msgs.append(ToolMessage(content=response, name=name, tool_call_id=tool_call["id"]))
+                continue
+
             try:
                 args = PlaceOrderArgs(**tool_call["args"])
             except Exception as exc:
@@ -539,7 +590,7 @@ def order_node(state: OrderState) -> OrderState:
                 continue
 
             eta = randint(1, 5)
-            summary = OrderSummary(items=order)
+            summary = OrderSummary(items=order, discount_percent=active_discount_percent)
 
             html_rows = "".join(
                 f"<tr><td style='padding:4px 16px 4px 0'>{i.description}</td>"
@@ -549,7 +600,7 @@ def order_node(state: OrderState) -> OrderState:
             html_rows += (
                 "<tr style='border-top:2px solid #333'>"
                 f"<td style='padding-top:6px'><strong>Total</strong></td>"
-                f"<td style='text-align:right;padding-top:6px'><strong>${summary.total:.2f}</strong></td></tr>"
+                f"<td style='text-align:right;padding-top:6px'><strong>${summary.total():.2f}</strong></td></tr>"
             )
             html_body = (
                 "<h2>&#9749; Your BaristaBot Order</h2>"
@@ -562,7 +613,7 @@ def order_node(state: OrderState) -> OrderState:
             text_rows = "\n".join(
                 f"  {i.description:<40} ${i.price:.2f}" for i in summary.items
             ) or "  (no items)"
-            text_rows += f"\n  {'Total':<40} ${summary.total:.2f}"
+            text_rows += f"\n  {'Total':<40} ${summary.total():.2f}"
             text_body = (
                 f"Hi {args.name}, thanks for your order!\n\n"
                 f"Order Summary:\n{text_rows}\n\n"
@@ -579,7 +630,7 @@ def order_node(state: OrderState) -> OrderState:
                 })
                 order_placed = True
                 response = str(eta)
-                print(f"[SERVER LOG] Email sent to {args.name} <{args.email}> — {len(summary.items)} item(s), total ${summary.total:.2f}")
+                print(f"[SERVER LOG] Email sent to {args.name} <{args.email}> — {len(summary.items)} item(s), total ${summary.total():.2f}")
             except Exception as exc:
                 print(f"[EMAIL ERROR] {exc}")
                 response = (
@@ -599,6 +650,8 @@ def order_node(state: OrderState) -> OrderState:
         "order": [i.model_dump() for i in order],
         "finished": order_placed,
         "discount_offered": discount_offered,
+        "payment_confirmed": payment_confirmed,
+        "active_discount_percent": active_discount_percent,
     }
 
 
