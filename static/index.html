@@ -273,6 +273,7 @@
   let squareAppId = '';
   let squareLocationId = '';
   let inactivityTimer = null;
+  let renderedCount = 0;
 
   const INACTIVITY_MS = 30_000;
   const NUDGE_MESSAGES = [
@@ -294,6 +295,13 @@
   const cardContainer = document.getElementById('card-container');
 
   // ── Render helpers ─────────────────────────────────────────────────────────
+  function scrollToBottom() {
+    // Wait for the DOM to paint before calculating the new scrollHeight
+    requestAnimationFrame(() => {
+      chatEl.scrollTo({ top: chatEl.scrollHeight, behavior: 'smooth' });
+    });
+  }
+
   function addBubble(role, text) {
     const div = document.createElement('div');
     div.className = `bubble ${role}`;
@@ -303,7 +311,7 @@
       div.textContent = text;
     }
     chatEl.appendChild(div);
-    chatEl.scrollTop = chatEl.scrollHeight;
+    scrollToBottom();
     return div;
   }
 
@@ -313,7 +321,7 @@
     el.id = 'typing';
     el.innerHTML = '<span></span><span></span><span></span>';
     chatEl.appendChild(el);
-    chatEl.scrollTop = chatEl.scrollHeight;
+    scrollToBottom();
   }
 
   function hideTyping() {
@@ -339,10 +347,34 @@
   }
 
   function renderMessages(messages) {
-    chatEl.innerHTML = '';
-    for (const m of messages) {
-      addBubble(m.role === 'assistant' ? 'bot' : 'user', m.text);
+    // Reuse the typing-indicator element for the first new message instead
+    // of removing it and inserting a separate bubble. Removing it first
+    // shrinks the scrollable content while still scrolled to the bottom —
+    // the browser instantly (non-smoothly) clamps scrollTop to correct that,
+    // which is the visible "snap up", right before the smooth scroll-to-
+    // bottom call animates back down. Morphing in place never shrinks the
+    // container, so there's nothing to clamp.
+    const typingEl = document.getElementById('typing');
+    let usedTyping = false;
+    for (let i = renderedCount; i < messages.length; i++) {
+      const m = messages[i];
+      const role = m.role === 'assistant' ? 'bot' : 'user';
+      if (!usedTyping && typingEl) {
+        typingEl.removeAttribute('id');
+        typingEl.className = `bubble ${role}`;
+        if (role === 'bot' && window.marked) {
+          typingEl.innerHTML = marked.parse(m.text);
+        } else {
+          typingEl.textContent = m.text;
+        }
+        scrollToBottom();
+        usedTyping = true;
+      } else {
+        addBubble(role, m.text);
+      }
     }
+    renderedCount = messages.length;
+    if (!usedTyping) hideTyping(); // no new messages this round; just clear it normally
   }
 
   function setInputEnabled(enabled) {
@@ -440,6 +472,7 @@
     inputEl.value = '';
     inputEl.style.height = 'auto';
     addBubble('user', text);
+    renderedCount++; // this message is already on screen; data.messages will include it too
     setInputEnabled(false);
     resetInactivityTimer(); // stop nudging while bot is thinking
     showTyping();
@@ -451,7 +484,6 @@
         body: JSON.stringify({ message: text }),
       });
       const data = await res.json();
-      hideTyping();
       renderMessages(data.messages);
       await handleInterrupt(data.interrupt);
       startInactivityTimer(); // start 30s countdown after bot replies
@@ -478,6 +510,7 @@
   // ── Boot ───────────────────────────────────────────────────────────────────
   async function init() {
     chatEl.innerHTML = '';
+    renderedCount = 0;
     backdrop.classList.remove('open');
     resetInactivityTimer();
     nudgeIndex = 0;
@@ -495,7 +528,6 @@
       const res = await fetch('/thread/new', { method: 'POST' });
       const data = await res.json();
       threadId = data.thread_id;
-      hideTyping();
       renderMessages(data.messages);
       await handleInterrupt(data.interrupt);
       startInactivityTimer(); // begin nudge countdown after welcome message

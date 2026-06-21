@@ -30,6 +30,23 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# Tool results meant to be shown to the customer as-is (e.g. a menu table or
+# the running order list). Tool calls NOT in this set carry internal/control
+# data for the LLM to interpret (discount accept/decline status, payment
+# success codes, ETA integers, etc.) — surfacing them raw leaked things like
+# "Customer declined the discount. User response: ..." and "payment_success"
+# directly into the chat. The chatbot's own follow-up AIMessage is what should
+# describe those outcomes to the customer.
+#
+# add_to_order is intentionally excluded: its raw result is just a bare
+# "<drink> (<modifiers>) ($price)" line, and the chatbot always emits a
+# natural-language follow-up describing the addition right after. Showing
+# both produced duplicate-looking bubbles (e.g. "latte (vanilla, iced)
+# ($4.50)" immediately followed by "Got it! I've added an iced vanilla
+# latte..."). The follow-up message alone is what the customer should see.
+DISPLAYABLE_TOOL_RESULTS = {"get_full_menu", "get_menu", "get_order", "clear_order"}
+
+
 def extract_text(content) -> str:
     if isinstance(content, str):
         return content
@@ -54,7 +71,8 @@ def get_messages(thread_id: str) -> list[dict]:
         if msg.type == "ai" and text.strip():
             result.append({"role": "assistant", "text": text})
         elif msg.type == "tool" and text.strip():
-            result.append({"role": "assistant", "text": text})
+            if getattr(msg, "name", None) in DISPLAYABLE_TOOL_RESULTS:
+                result.append({"role": "assistant", "text": text})
         elif msg.type == "human":
             result.append({"role": "user", "text": text})
     return result

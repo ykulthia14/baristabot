@@ -162,6 +162,55 @@ DISCOUNT_OFFERS = [
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+class DiscountResponse(BaseModel):
+    accepted: bool = Field(
+        description=(
+            "True if the customer's reply indicates they want to accept and use the "
+            "discount code, False if they are declining or staying undecided."
+        )
+    )
+
+
+def classify_discount_response(user_response: str) -> bool:
+    """Determine whether a free-text reply accepts a discount offer.
+
+    A fixed keyword list (e.g. {"yes", "sure", "ok", ...}) is brittle: it misses
+    typos ("discoutn"), paraphrases ("alright, go ahead"), and anything not in the
+    list, silently treating them as declines. Worse, that misclassification can
+    desync from what the chatbot LLM itself goes on to tell the customer (which
+    reads the same reply with full language understanding) — e.g. the bot saying
+    "I've applied the discount!" while the order total never actually changed.
+    To keep the recorded outcome consistent with what the customer is told, we
+    ask the LLM to classify the reply directly, with a conservative keyword
+    fallback only if that call fails outright.
+    """
+    try:
+        classifier = llm.with_structured_output(DiscountResponse)
+        result = classifier.invoke(
+            "A cafe customer was just offered a discount code on their order. "
+            f"Their reply was: {user_response!r}\n\n"
+            "Does this reply mean they want to accept and use the discount? "
+            "Treat typos, casual phrasing, and indirect agreement (e.g. "
+            "\"alright, go ahead\") as acceptance. Only treat clear refusals or "
+            "non-answers as declines."
+        )
+        return bool(result.accepted)
+    except Exception:
+        # Conservative fallback: check decline signals first, then a broader
+        # set of affirmative phrasings than the original list.
+        text = str(user_response).strip().lower()
+        decline_words = {"no", "nah", "nope", "not interested", "never mind", "skip", "decline", "pass"}
+        if any(w in text for w in decline_words):
+            return False
+        accept_words = {
+            "yes", "sure", "ok", "okay", "deal", "accept", "yeah", "yep", "yup",
+            "great", "sounds good", "go ahead", "alright", "all right",
+            "let's do it", "lets do it", "do it", "i'll take it", "ill take it",
+            "use it", "apply it", "please",
+        }
+        return any(w in text for w in accept_words)
+
+
 def order_items_from_state(raw: list) -> list[OrderItem]:
     result = []
     for item in raw:
@@ -543,7 +592,7 @@ def order_node(state: OrderState) -> OrderState:
                     f"Would you like to go ahead and order?"
                 )
             else:
-                discounted_total = offer.apply(summary.total)
+                discounted_total = offer.apply(summary.total())
                 user_response = interrupt(
                     f"We do not want to lose you! Here is a special offer:\n\n"
                     f"Code **{offer.code}** — **{offer.percent}% off** your order!\n"
@@ -551,10 +600,7 @@ def order_node(state: OrderState) -> OrderState:
                     f"Would you like to go ahead with this discount?"
                 )
 
-            accepted = any(
-                word in str(user_response).lower()
-                for word in {"yes", "sure", "ok", "okay", "deal", "accept", "yeah", "great", "sounds good"}
-            )
+            accepted = classify_discount_response(user_response)
 
             if accepted:
                 # Store discount percent in state — never mutate item prices
